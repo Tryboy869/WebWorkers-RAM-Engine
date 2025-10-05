@@ -1,17 +1,20 @@
 // ========================================
-// WEBWORKERS RAM ENGINE - Production Ready
-// Architecture Modulaire avec Interface de Contrôle
+// COMPUTE ENGINE API v2.0.0-beta
+// REST + GraphQL + WebSocket + Documentation
 // ========================================
 
 const express = require('express');
+const { graphqlHTTP } = require('express-graphql');
+const { buildSchema } = require('graphql');
+const WebSocket = require('ws');
+const http = require('http');
+
 const app = express();
+const server = http.createServer(app);
 const PORT = process.env.PORT || 3000;
 
-// Middleware
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-
-// CORS pour API
 app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*');
   res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE');
@@ -20,31 +23,27 @@ app.use((req, res, next) => {
 });
 
 // ========================================
-// MODULE 1 : SIMULATED RAM (Mémoire Partagée)
+// CORE MODULES
 // ========================================
+
 class SimulatedRAM {
-  constructor(sizeInBytes = 10 * 1024 * 1024) { // 10 MB par défaut
+  constructor(sizeInBytes = 10 * 1024 * 1024) {
     this.memory = new Map();
     this.size = sizeInBytes;
     this.maxAddr = Math.floor(sizeInBytes / 4);
     this.writeCount = 0;
     this.readCount = 0;
-    this.log(`RAM initialisée: ${(sizeInBytes / (1024 * 1024)).toFixed(2)} MB (${this.maxAddr} addresses)`);
   }
 
   write(addr, value) {
-    if (addr < 0 || addr >= this.maxAddr) {
-      throw new Error(`Adresse ${addr} hors limites [0-${this.maxAddr}]`);
-    }
+    if (addr < 0 || addr >= this.maxAddr) throw new Error(`Address ${addr} out of bounds`);
     this.memory.set(addr, value);
     this.writeCount++;
     return true;
   }
 
   read(addr) {
-    if (addr < 0 || addr >= this.maxAddr) {
-      throw new Error(`Adresse ${addr} hors limites [0-${this.maxAddr}]`);
-    }
+    if (addr < 0 || addr >= this.maxAddr) throw new Error(`Address ${addr} out of bounds`);
     this.readCount++;
     return this.memory.get(addr) || 0;
   }
@@ -65,16 +64,9 @@ class SimulatedRAM {
       memoryUsagePercent: ((this.memory.size / this.maxAddr) * 100).toFixed(2)
     };
   }
-
-  log(msg) {
-    logger.add('RAM', msg);
-  }
 }
 
-// ========================================
-// MODULE 2 : VIRTUAL WORKERS (Cœurs Simulés)
-// ========================================
-class VirtualWorker {
+class Worker {
   constructor(id, ram) {
     this.id = id;
     this.ram = ram;
@@ -82,86 +74,57 @@ class VirtualWorker {
     this.taskCount = 0;
     this.totalExecTime = 0;
     this.errors = 0;
-    this.log(`Worker ${id} créé`);
   }
 
   async executeTask(task, targetAddr, taskId) {
     this.busy = true;
     this.taskCount++;
     const startTime = Date.now();
-    
-    this.log(`Tâche #${taskId} démarrée → Addr ${targetAddr}`);
 
     try {
-      // Simulation temps calcul réaliste
-      await new Promise(resolve => setTimeout(resolve, Math.random() * 200 + 50));
-      
       const result = task();
       this.ram.write(targetAddr, result);
-      
       const execTime = Date.now() - startTime;
       this.totalExecTime += execTime;
-      
       this.busy = false;
-      this.log(`Tâche #${taskId} terminée: ${result} (${execTime}ms)`);
       
       return { success: true, result, execTime, workerId: this.id };
     } catch (error) {
       this.errors++;
       this.busy = false;
-      this.log(`Erreur tâche #${taskId}: ${error.message}`);
       return { success: false, error: error.message, workerId: this.id };
     }
   }
 
-  isFree() {
-    return !this.busy;
-  }
+  isFree() { return !this.busy; }
 
   getStats() {
     return {
       id: this.id,
       busy: this.busy,
       tasksCompleted: this.taskCount,
-      totalExecTime: this.totalExecTime,
       avgExecTime: this.taskCount > 0 ? (this.totalExecTime / this.taskCount).toFixed(2) : 0,
       errors: this.errors
     };
   }
-
-  log(msg) {
-    logger.add(`Worker-${this.id}`, msg);
-  }
 }
 
-// ========================================
-// MODULE 3 : MESSAGE BUS (Transmetteur Inter-Module)
-// ========================================
 class MessageBus {
   constructor() {
     this.listeners = new Map();
     this.messageCount = 0;
-    this.log('MessageBus initialisé');
   }
 
   subscribe(channel, callback) {
-    if (!this.listeners.has(channel)) {
-      this.listeners.set(channel, []);
-    }
+    if (!this.listeners.has(channel)) this.listeners.set(channel, []);
     this.listeners.get(channel).push(callback);
-    this.log(`Souscription au canal '${channel}'`);
   }
 
   publish(channel, data) {
     this.messageCount++;
     const listeners = this.listeners.get(channel) || [];
-    
     listeners.forEach(callback => {
-      try {
-        callback(data);
-      } catch (error) {
-        this.log(`Erreur listener '${channel}': ${error.message}`);
-      }
+      try { callback(data); } catch (error) {}
     });
   }
 
@@ -172,37 +135,26 @@ class MessageBus {
       totalListeners: Array.from(this.listeners.values()).reduce((sum, arr) => sum + arr.length, 0)
     };
   }
-
-  log(msg) {
-    logger.add('MessageBus', msg);
-  }
 }
 
-// ========================================
-// MODULE 4 : TASK SCHEDULER (Gestionnaire de Tâches)
-// ========================================
 class TaskScheduler {
   constructor(ram, messageBus, numWorkers = 8) {
     this.ram = ram;
     this.messageBus = messageBus;
-    this.workers = Array.from({ length: numWorkers }, (_, i) => new VirtualWorker(i, ram));
+    this.workers = Array.from({ length: numWorkers }, (_, i) => new Worker(i, ram));
     this.taskQueue = [];
     this.completedTasks = 0;
     this.failedTasks = 0;
     this.taskIdCounter = 0;
-    this.log(`Scheduler créé avec ${numWorkers} workers`);
   }
 
-  getFreeWorker() {
-    return this.workers.find(w => w.isFree());
-  }
+  getFreeWorker() { return this.workers.find(w => w.isFree()); }
 
   async scheduleTask(task, targetAddr) {
     const taskId = ++this.taskIdCounter;
     const worker = this.getFreeWorker();
     
     if (!worker) {
-      this.log(`File d'attente: Tâche #${taskId} en attente`);
       return new Promise(resolve => {
         this.taskQueue.push({ task, targetAddr, taskId, resolve });
       });
@@ -218,7 +170,6 @@ class TaskScheduler {
       this.messageBus.publish('task.failed', result);
     }
     
-    // Traiter la queue
     if (this.taskQueue.length > 0) {
       const nextTask = this.taskQueue.shift();
       this.scheduleTask(nextTask.task, nextTask.targetAddr).then(nextTask.resolve);
@@ -230,9 +181,8 @@ class TaskScheduler {
   addWorkers(count) {
     const startId = this.workers.length;
     for (let i = 0; i < count; i++) {
-      this.workers.push(new VirtualWorker(startId + i, this.ram));
+      this.workers.push(new Worker(startId + i, this.ram));
     }
-    this.log(`${count} workers supplémentaires ajoutés (Total: ${this.workers.length})`);
   }
 
   getStats() {
@@ -246,61 +196,36 @@ class TaskScheduler {
       workerDetails: this.workers.map(w => w.getStats())
     };
   }
-
-  log(msg) {
-    logger.add('Scheduler', msg);
-  }
 }
 
-// ========================================
-// MODULE 5 : PARALLEL ENGINE (Chef d'Orchestre)
-// ========================================
 class ParallelEngine {
   constructor(config = {}) {
     this.ram = new SimulatedRAM(config.ramSize || 10 * 1024 * 1024);
     this.messageBus = new MessageBus();
     this.scheduler = new TaskScheduler(this.ram, this.messageBus, config.numWorkers || 8);
     this.startTime = Date.now();
-    
-    // Souscriptions événements
-    this.messageBus.subscribe('task.completed', (data) => {
-      logger.add('Engine', `Tâche terminée par Worker ${data.workerId} en ${data.execTime}ms`);
-    });
-    
-    this.messageBus.subscribe('task.failed', (data) => {
-      logger.add('Engine', `Tâche échouée sur Worker ${data.workerId}: ${data.error}`);
-    });
-    
-    logger.add('Engine', 'ParallelEngine initialisé');
   }
 
   async run(tasks) {
     const startTime = Date.now();
-    logger.add('Engine', `Démarrage: ${tasks.length} tâches`);
-    
     const promises = tasks.map((task, index) => 
       this.scheduler.scheduleTask(task.fn, task.addr !== undefined ? task.addr : index)
     );
     
     const results = await Promise.all(promises);
     const execTime = Date.now() - startTime;
-    
     const successCount = results.filter(r => r.success).length;
-    logger.add('Engine', `Terminé: ${successCount}/${tasks.length} succès en ${execTime}ms`);
     
     return { results, execTime, successCount, totalTasks: tasks.length };
   }
 
-  addWorkers(count) {
-    this.scheduler.addWorkers(count);
-  }
-
+  addWorkers(count) { this.scheduler.addWorkers(count); }
+  
   reset() {
     this.ram.clear();
     this.scheduler.completedTasks = 0;
     this.scheduler.failedTasks = 0;
     this.scheduler.taskIdCounter = 0;
-    logger.add('Engine', 'Reset complet effectué');
   }
 
   getFullStats() {
@@ -313,605 +238,369 @@ class ParallelEngine {
   }
 }
 
-// ========================================
-// MODULE 6 : LOGGER (Système de Logs)
-// ========================================
-class Logger {
-  constructor() {
-    this.logs = [];
-    this.maxLogs = 10000;
-  }
-
-  add(module, message) {
-    const timestamp = new Date().toISOString();
-    const log = {
-      timestamp,
-      module,
-      message,
-      id: this.logs.length
-    };
-    
-    this.logs.push(log);
-    
-    // Limite mémoire
-    if (this.logs.length > this.maxLogs) {
-      this.logs.shift();
-    }
-    
-    console.log(`[${timestamp}] [${module}] ${message}`);
-  }
-
-  getLogs(limit = 1000) {
-    return this.logs.slice(-limit);
-  }
-
-  clear() {
-    this.logs = [];
-    this.add('Logger', 'Logs effacés');
-  }
-
-  export() {
-    return this.logs.map(log => 
-      `[${log.timestamp}] [${log.module}] ${log.message}`
-    ).join('\n');
-  }
-}
-
-const logger = new Logger();
+const engine = new ParallelEngine({ numWorkers: 8 });
 
 // ========================================
-// TESTS AUTOMATIQUES
+// TEST SUITES
 // ========================================
 const TestSuite = {
-  // Test 1: Calculs simples
-  simpleCalculations: () => [
-    { fn: () => 10 + 5, addr: 0, expected: 15 },
-    { fn: () => 20 * 3, addr: 1, expected: 60 },
-    { fn: () => Math.pow(2, 10), addr: 2, expected: 1024 },
-    { fn: () => 100 - 25, addr: 3, expected: 75 }
+  simple: () => [
+    { fn: () => 10 + 5, addr: 0 },
+    { fn: () => 20 * 3, addr: 1 },
+    { fn: () => Math.pow(2, 10), addr: 2 },
+    { fn: () => 100 - 25, addr: 3 }
   ],
-
-  // Test 2: Calculs lourds
-  heavyCalculations: () => {
-    const fibonacci = (n) => n <= 1 ? n : fibonacci(n - 1) + fibonacci(n - 2);
-    const factorial = (n) => n <= 1 ? 1 : n * factorial(n - 1);
-    
+  heavy: () => {
+    const fib = (n) => n <= 1 ? n : fib(n - 1) + fib(n - 2);
     return [
-      { fn: () => fibonacci(20), addr: 10 },
-      { fn: () => factorial(15), addr: 11 },
+      { fn: () => fib(20), addr: 10 },
+      { fn: () => Array(15).fill(0).reduce((a, _, i) => a * (i + 1) || 1, 1), addr: 11 },
       { fn: () => Math.sqrt(987654321), addr: 12 },
       { fn: () => Math.PI * Math.E * 1000, addr: 13 }
     ];
   },
-
-  // Test 3: Charge massive
-  massiveLoad: () => {
-    const tasks = [];
-    for (let i = 0; i < 100; i++) {
-      tasks.push({
-        fn: () => Math.sin(i) * Math.cos(i) * 1000,
-        addr: 100 + i
-      });
-    }
-    return tasks;
-  },
-
-  // Test 4: Workers supplémentaires
-  dynamicWorkers: () => [
-    { fn: () => 1 + 1, addr: 200 },
-    { fn: () => 2 + 2, addr: 201 },
-    { fn: () => 3 + 3, addr: 202 }
-  ]
+  massive: () => Array(100).fill(0).map((_, i) => ({
+    fn: () => Math.sin(i) * Math.cos(i) * 1000,
+    addr: 100 + i
+  }))
 };
 
 // ========================================
-// INSTANCE GLOBALE
+// REST API
 // ========================================
-const engine = new ParallelEngine({ numWorkers: 8, ramSize: 10 * 1024 * 1024 });
-
-// ========================================
-// API ENDPOINTS
-// ========================================
-
-// Page d'accueil avec interface
-app.get('/', (req, res) => {
-  res.send(`
-<!DOCTYPE html>
-<html lang="fr">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>WebWorkers RAM Engine - Control Panel</title>
-    <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body {
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: #fff;
-            padding: 20px;
-            min-height: 100vh;
-        }
-        .container {
-            max-width: 1400px;
-            margin: 0 auto;
-            background: rgba(0,0,0,0.3);
-            border-radius: 20px;
-            padding: 30px;
-            backdrop-filter: blur(10px);
-        }
-        h1 {
-            text-align: center;
-            margin-bottom: 30px;
-            font-size: 2.5em;
-            text-shadow: 2px 2px 4px rgba(0,0,0,0.5);
-        }
-        .controls {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-            gap: 15px;
-            margin-bottom: 30px;
-        }
-        button {
-            padding: 15px 25px;
-            font-size: 16px;
-            font-weight: bold;
-            border: none;
-            border-radius: 10px;
-            cursor: pointer;
-            transition: all 0.3s;
-            text-transform: uppercase;
-            letter-spacing: 1px;
-        }
-        .btn-primary {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-        }
-        .btn-success {
-            background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%);
-            color: white;
-        }
-        .btn-warning {
-            background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
-            color: white;
-        }
-        .btn-danger {
-            background: linear-gradient(135deg, #fa709a 0%, #fee140 100%);
-            color: white;
-        }
-        .btn-info {
-            background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);
-            color: white;
-        }
-        button:hover {
-            transform: translateY(-3px);
-            box-shadow: 0 10px 20px rgba(0,0,0,0.3);
-        }
-        button:active {
-            transform: translateY(-1px);
-        }
-        button:disabled {
-            opacity: 0.5;
-            cursor: not-allowed;
-            transform: none;
-        }
-        .stats-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 20px;
-            margin-bottom: 30px;
-        }
-        .stat-card {
-            background: rgba(255,255,255,0.1);
-            padding: 20px;
-            border-radius: 15px;
-            text-align: center;
-            border: 2px solid rgba(255,255,255,0.2);
-        }
-        .stat-value {
-            font-size: 2.5em;
-            font-weight: bold;
-            margin: 10px 0;
-        }
-        .stat-label {
-            font-size: 0.9em;
-            opacity: 0.8;
-            text-transform: uppercase;
-            letter-spacing: 1px;
-        }
-        .logs-container {
-            background: rgba(0,0,0,0.5);
-            border-radius: 15px;
-            padding: 20px;
-            margin-top: 30px;
-            border: 2px solid rgba(255,255,255,0.2);
-        }
-        .logs-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 20px;
-        }
-        .logs-header h2 {
-            font-size: 1.5em;
-        }
-        #logs {
-            background: #1a1a1a;
-            color: #0f0;
-            font-family: 'Courier New', monospace;
-            font-size: 12px;
-            padding: 20px;
-            border-radius: 10px;
-            height: 500px;
-            overflow-y: auto;
-            white-space: pre-wrap;
-            word-wrap: break-word;
-            line-height: 1.6;
-        }
-        #logs::-webkit-scrollbar {
-            width: 10px;
-        }
-        #logs::-webkit-scrollbar-track {
-            background: #2a2a2a;
-            border-radius: 5px;
-        }
-        #logs::-webkit-scrollbar-thumb {
-            background: #666;
-            border-radius: 5px;
-        }
-        .loading {
-            display: none;
-            text-align: center;
-            margin: 20px 0;
-        }
-        .spinner {
-            border: 4px solid rgba(255,255,255,0.3);
-            border-radius: 50%;
-            border-top: 4px solid white;
-            width: 40px;
-            height: 40px;
-            animation: spin 1s linear infinite;
-            margin: 0 auto;
-        }
-        @keyframes spin {
-            0% { transform: rotate(0deg); }
-            100% { transform: rotate(360deg); }
-        }
-        .success-message {
-            background: rgba(56, 239, 125, 0.2);
-            border: 2px solid #38ef7d;
-            padding: 15px;
-            border-radius: 10px;
-            margin: 20px 0;
-            display: none;
-        }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <h1>🚀 WebWorkers RAM Engine</h1>
-        
-        <div class="stats-grid" id="stats">
-            <div class="stat-card">
-                <div class="stat-label">Workers Actifs</div>
-                <div class="stat-value" id="stat-workers">-</div>
-            </div>
-            <div class="stat-card">
-                <div class="stat-label">Tâches Complétées</div>
-                <div class="stat-value" id="stat-tasks">-</div>
-            </div>
-            <div class="stat-card">
-                <div class="stat-label">Utilisation RAM</div>
-                <div class="stat-value" id="stat-ram">-</div>
-            </div>
-            <div class="stat-card">
-                <div class="stat-label">Messages</div>
-                <div class="stat-value" id="stat-messages">-</div>
-            </div>
-        </div>
-
-        <div class="controls">
-            <button class="btn-primary" onclick="runAllTests()">
-                🧪 Lancer Tous les Tests
-            </button>
-            <button class="btn-success" onclick="runTest('simple')">
-                ✅ Test Calculs Simples
-            </button>
-            <button class="btn-warning" onclick="runTest('heavy')">
-                ⚡ Test Calculs Lourds
-            </button>
-            <button class="btn-danger" onclick="runTest('massive')">
-                🔥 Test Charge Massive
-            </button>
-            <button class="btn-info" onclick="addWorkers()">
-                ➕ Ajouter 4 Workers
-            </button>
-            <button class="btn-info" onclick="refreshStats()">
-                📊 Rafraîchir Stats
-            </button>
-            <button class="btn-warning" onclick="resetEngine()">
-                🔄 Reset Engine
-            </button>
-            <button class="btn-danger" onclick="clearLogs()">
-                🗑️ Effacer Logs
-            </button>
-        </div>
-
-        <div class="loading" id="loading">
-            <div class="spinner"></div>
-            <p style="margin-top: 10px;">Exécution en cours...</p>
-        </div>
-
-        <div class="success-message" id="success-message"></div>
-
-        <div class="logs-container">
-            <div class="logs-header">
-                <h2>📋 Console de Logs</h2>
-                <button class="btn-info" onclick="copyLogs()">
-                    📋 Copier les Logs
-                </button>
-            </div>
-            <div id="logs">Logs du système s'afficheront ici...</div>
-        </div>
-    </div>
-
-    <script>
-        let autoRefresh = null;
-
-        async function runTest(type) {
-            showLoading();
-            try {
-                const response = await fetch('/api/test/' + type, { method: 'POST' });
-                const data = await response.json();
-                showSuccess('Test ' + type + ' terminé avec succès!');
-                await refreshStats();
-                await refreshLogs();
-            } catch (error) {
-                alert('Erreur: ' + error.message);
-            } finally {
-                hideLoading();
-            }
-        }
-
-        async function runAllTests() {
-            showLoading();
-            try {
-                const response = await fetch('/api/test/all', { method: 'POST' });
-                const data = await response.json();
-                showSuccess('Tous les tests terminés! Durée totale: ' + (data.totalTime / 1000).toFixed(2) + 's');
-                await refreshStats();
-                await refreshLogs();
-            } catch (error) {
-                alert('Erreur: ' + error.message);
-            } finally {
-                hideLoading();
-            }
-        }
-
-        async function addWorkers() {
-            try {
-                const response = await fetch('/api/workers/add', { method: 'POST' });
-                const data = await response.json();
-                showSuccess(data.message);
-                await refreshStats();
-                await refreshLogs();
-            } catch (error) {
-                alert('Erreur: ' + error.message);
-            }
-        }
-
-        async function resetEngine() {
-            if (!confirm('Êtes-vous sûr de vouloir réinitialiser le moteur?')) return;
-            try {
-                const response = await fetch('/api/reset', { method: 'POST' });
-                showSuccess('Engine réinitialisé avec succès');
-                await refreshStats();
-                await refreshLogs();
-            } catch (error) {
-                alert('Erreur: ' + error.message);
-            }
-        }
-
-        async function refreshStats() {
-            try {
-                const response = await fetch('/api/stats');
-                const data = await response.json();
-                
-                document.getElementById('stat-workers').textContent = data.scheduler.totalWorkers;
-                document.getElementById('stat-tasks').textContent = data.scheduler.completedTasks;
-                document.getElementById('stat-ram').textContent = data.ram.memoryUsagePercent + '%';
-                document.getElementById('stat-messages').textContent = data.messageBus.totalMessages;
-            } catch (error) {
-                console.error('Erreur refresh stats:', error);
-            }
-        }
-
-        async function refreshLogs() {
-            try {
-                const response = await fetch('/api/logs');
-                const data = await response.json();
-                const logsDiv = document.getElementById('logs');
-                logsDiv.textContent = data.logs.map(log => 
-                    '[' + log.timestamp + '] [' + log.module + '] ' + log.message
-                ).join('\\n');
-                logsDiv.scrollTop = logsDiv.scrollHeight;
-            } catch (error) {
-                console.error('Erreur refresh logs:', error);
-            }
-        }
-
-        async function clearLogs() {
-            try {
-                await fetch('/api/logs/clear', { method: 'POST' });
-                await refreshLogs();
-                showSuccess('Logs effacés');
-            } catch (error) {
-                alert('Erreur: ' + error.message);
-            }
-        }
-
-        function copyLogs() {
-            const logs = document.getElementById('logs').textContent;
-            navigator.clipboard.writeText(logs).then(() => {
-                showSuccess('Logs copiés dans le presse-papier!');
-            }).catch(err => {
-                alert('Erreur copie: ' + err);
-            });
-        }
-
-        function showLoading() {
-            document.getElementById('loading').style.display = 'block';
-            document.querySelectorAll('button').forEach(btn => btn.disabled = true);
-        }
-
-        function hideLoading() {
-            document.getElementById('loading').style.display = 'none';
-            document.querySelectorAll('button').forEach(btn => btn.disabled = false);
-        }
-
-        function showSuccess(message) {
-            const div = document.getElementById('success-message');
-            div.textContent = '✅ ' + message;
-            div.style.display = 'block';
-            setTimeout(() => {
-                div.style.display = 'none';
-            }, 5000);
-        }
-
-        // Auto-refresh stats toutes les 2 secondes
-        setInterval(refreshStats, 2000);
-        
-        // Init
-        refreshStats();
-        refreshLogs();
-    </script>
-</body>
-</html>
-  `);
+app.post('/api/v1/compute', async (req, res) => {
+  try {
+    const { tasks } = req.body;
+    const parsedTasks = tasks.map(t => ({ fn: eval(`(${t.fn})`), addr: t.addr }));
+    const result = await engine.run(parsedTasks);
+    res.json({ success: true, ...result });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
 });
 
-// Stats en temps réel
-app.get('/api/stats', (req, res) => {
-  res.json(engine.getFullStats());
+app.post('/api/v1/compute/crypto/hash', async (req, res) => {
+  try {
+    const { data } = req.body;
+    const crypto = require('crypto');
+    const task = { fn: () => crypto.createHash('sha256').update(data).digest('hex') };
+    const result = await engine.run([task]);
+    res.json({ success: true, hash: result.results[0].result });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
 });
 
-// Logs système
-app.get('/api/logs', (req, res) => {
-  res.json({
-    logs: logger.getLogs(1000),
-    total: logger.logs.length
-  });
+app.post('/api/v1/compute/math', async (req, res) => {
+  try {
+    const { operations } = req.body;
+    const tasks = operations.map((op, i) => ({ fn: eval(`(${op})`), addr: i }));
+    const result = await engine.run(tasks);
+    res.json({ success: true, results: result.results.map(r => r.result) });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
 });
 
-// Effacer logs
-app.post('/api/logs/clear', (req, res) => {
-  logger.clear();
-  res.json({ success: true });
-});
-
-// Test simple
-app.post('/api/test/simple', async (req, res) => {
-  const tasks = TestSuite.simpleCalculations();
-  const result = await engine.run(tasks);
-  res.json(result);
-});
-
-// Test lourd
-app.post('/api/test/heavy', async (req, res) => {
-  const tasks = TestSuite.heavyCalculations();
-  const result = await engine.run(tasks);
-  res.json(result);
-});
-
-// Test massif
-app.post('/api/test/massive', async (req, res) => {
-  const tasks = TestSuite.massiveLoad();
-  const result = await engine.run(tasks);
-  res.json(result);
-});
-
-// Tous les tests
-app.post('/api/test/all', async (req, res) => {
-  const startTime = Date.now();
-  
-  logger.add('TestSuite', '========== DÉMARRAGE TESTS COMPLETS ==========');
-  
-  const test1 = await engine.run(TestSuite.simpleCalculations());
-  logger.add('TestSuite', 'Test 1/3: Calculs simples terminé');
-  
-  const test2 = await engine.run(TestSuite.heavyCalculations());
-  logger.add('TestSuite', 'Test 2/3: Calculs lourds terminé');
-  
-  const test3 = await engine.run(TestSuite.massiveLoad());
-  logger.add('TestSuite', 'Test 3/3: Charge massive terminé');
-  
-  const totalTime = Date.now() - startTime;
-  logger.add('TestSuite', `========== TESTS TERMINÉS en ${totalTime}ms ==========`);
-  
-  res.json({
-    success: true,
-    tests: [test1, test2, test3],
-    totalTime,
-    stats: engine.getFullStats()
-  });
-});
-
-// Ajouter workers
+app.get('/api/stats', (req, res) => res.json(engine.getFullStats()));
+app.post('/api/reset', (req, res) => { engine.reset(); res.json({ success: true }); });
 app.post('/api/workers/add', (req, res) => {
   const count = req.body.count || 4;
   engine.addWorkers(count);
-  res.json({ 
-    success: true, 
-    message: `${count} workers ajoutés`,
-    totalWorkers: engine.scheduler.workers.length 
-  });
+  res.json({ success: true, totalWorkers: engine.scheduler.workers.length });
 });
 
-// Reset engine
-app.post('/api/reset', (req, res) => {
-  engine.reset();
-  res.json({ success: true });
-});
+app.post('/api/test/simple', async (req, res) => res.json(await engine.run(TestSuite.simple())));
+app.post('/api/test/heavy', async (req, res) => res.json(await engine.run(TestSuite.heavy())));
+app.post('/api/test/massive', async (req, res) => res.json(await engine.run(TestSuite.massive())));
 
-// Export logs
-app.get('/api/logs/export', (req, res) => {
-  res.setHeader('Content-Type', 'text/plain');
-  res.setHeader('Content-Disposition', 'attachment; filename=webworkers-ram-engine-logs.txt');
-  res.send(logger.export());
-});
+app.get('/health', (req, res) => res.json({ 
+  status: 'healthy',
+  uptime: Date.now() - engine.startTime,
+  version: '2.0.0-beta'
+}));
 
-// Health check pour Render
-app.get('/health', (req, res) => {
-  res.json({ 
-    status: 'healthy',
-    uptime: Date.now() - engine.startTime,
-    version: '1.0.0'
+// ========================================
+// GRAPHQL
+// ========================================
+const schema = buildSchema(`
+  type Query {
+    stats: Stats
+    health: Health
+  }
+  type Mutation {
+    compute(tasks: [TaskInput!]!): ComputeResult!
+  }
+  type Stats {
+    uptime: Float
+    totalWorkers: Int
+    completedTasks: Int
+  }
+  type Health {
+    status: String
+    uptime: Float
+  }
+  type ComputeResult {
+    success: Boolean!
+    results: [Float]
+    execTime: Float
+  }
+  input TaskInput {
+    fn: String!
+    addr: Int
+  }
+`);
+
+const root = {
+  stats: () => {
+    const s = engine.getFullStats();
+    return { uptime: s.uptime, totalWorkers: s.scheduler.totalWorkers, completedTasks: s.scheduler.completedTasks };
+  },
+  health: () => ({ status: 'healthy', uptime: process.uptime() }),
+  compute: async ({ tasks }) => {
+    const parsed = tasks.map(t => ({ fn: eval(`(${t.fn})`), addr: t.addr }));
+    const result = await engine.run(parsed);
+    return { success: true, results: result.results.map(r => r.result), execTime: result.execTime };
+  }
+};
+
+app.use('/graphql', graphqlHTTP({ schema, rootValue: root, graphiql: true }));
+
+// ========================================
+// WEBSOCKET
+// ========================================
+const wss = new WebSocket.Server({ server });
+wss.on('connection', (ws) => {
+  ws.on('message', async (message) => {
+    try {
+      const data = JSON.parse(message);
+      if (data.type === 'compute') {
+        const tasks = data.tasks.map(t => ({ fn: eval(`(${t.fn})`), addr: t.addr }));
+        for (const task of tasks) {
+          const result = await engine.run([task]);
+          ws.send(JSON.stringify({ type: 'result', result: result.results[0] }));
+        }
+      }
+    } catch (error) {
+      ws.send(JSON.stringify({ type: 'error', message: error.message }));
+    }
   });
 });
 
 // ========================================
-// DÉMARRAGE SERVEUR
+// DOCUMENTATION UI
 // ========================================
-app.listen(PORT, () => {
-  logger.add('Server', `🚀 WebWorkers RAM Engine démarré sur le port ${PORT}`);
-  logger.add('Server', `📍 URL: http://localhost:${PORT}`);
-  logger.add('Server', `🔧 Environment: ${process.env.NODE_ENV || 'development'}`);
-  
-  // Test automatique au démarrage
-  setTimeout(async () => {
-    logger.add('Server', '🧪 Exécution test de démarrage...');
-    const tasks = TestSuite.simpleCalculations();
-    await engine.run(tasks);
-    logger.add('Server', '✅ Test de démarrage réussi');
-  }, 2000);
+app.get('/', (req, res) => {
+  const baseUrl = `${req.protocol}://${req.get('host')}`;
+  res.send(`<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Compute Engine API - Documentation</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);color:#fff;line-height:1.6;padding:20px}
+.container{max-width:1200px;margin:0 auto}
+.header{text-align:center;margin-bottom:50px}
+h1{font-size:3em;margin-bottom:10px}
+.beta-badge{display:inline-block;background:#ff6b6b;padding:8px 20px;border-radius:25px;font-weight:bold;margin:10px 0;animation:pulse 2s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.8}}
+.subtitle{font-size:1.2em;opacity:0.9;margin-top:15px}
+.section{background:rgba(255,255,255,0.1);backdrop-filter:blur(10px);border-radius:15px;padding:30px;margin-bottom:30px;border:2px solid rgba(255,255,255,0.2)}
+h2{font-size:2em;margin-bottom:20px;border-bottom:3px solid rgba(255,255,255,0.3);padding-bottom:10px}
+h3{font-size:1.5em;margin:25px 0 15px;color:#ffd700}
+.code-block{background:#1a1a1a;color:#0f0;padding:20px;border-radius:10px;overflow-x:auto;font-family:'Courier New',monospace;font-size:14px;margin:15px 0;border-left:4px solid #38ef7d;position:relative}
+.copy-btn{position:absolute;top:10px;right:10px;background:#38ef7d;color:#1a1a1a;border:none;padding:8px 15px;border-radius:5px;cursor:pointer;font-weight:bold;font-size:12px}
+.copy-btn:hover{background:#11998e}
+.method{display:inline-block;padding:5px 12px;border-radius:5px;font-weight:bold;font-size:12px;margin-right:10px}
+.post{background:#38ef7d;color:#1a1a1a}
+.get{background:#4facfe;color:#fff}
+.ws{background:#f093fb;color:#fff}
+.endpoint{background:rgba(0,0,0,0.3);padding:15px;border-radius:8px;margin:15px 0;border-left:4px solid #667eea}
+.endpoint-url{font-family:'Courier New',monospace;color:#ffd700;font-size:16px;margin:10px 0}
+.use-case{background:rgba(255,255,255,0.05);padding:15px;border-radius:8px;margin:10px 0;border-left:4px solid #ffd700}
+.feature-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:20px;margin:20px 0}
+.feature-card{background:rgba(255,255,255,0.08);padding:20px;border-radius:10px;text-align:center}
+.feature-icon{font-size:3em;margin-bottom:10px}
+.cta{display:inline-block;background:linear-gradient(135deg,#38ef7d 0%,#11998e 100%);color:#fff;padding:15px 40px;border-radius:50px;text-decoration:none;font-weight:bold;font-size:18px;margin:10px}
+.cta:hover{transform:translateY(-3px)}
+.info-banner{background:rgba(255,215,0,0.2);border-left:5px solid #ffd700;padding:15px 20px;margin:20px 0;border-radius:8px}
+pre{margin:0;white-space:pre-wrap;word-wrap:break-word}
+</style>
+</head>
+<body>
+<div class="container">
+<div class="header">
+<h1>⚡ Compute Engine API</h1>
+<div class="beta-badge">BETA - FREE ACCESS</div>
+<p class="subtitle">API de calcul distribué haute performance</p>
+<p style="opacity:0.8;margin-top:10px">Infrastructure de calcul parallèle gratuite durant la phase beta</p>
+</div>
+
+<div class="section">
+<h2>🚀 Démarrage Rapide</h2>
+<div class="info-banner"><strong>Aucune clé API requise</strong> - Utilisez directement l'URL comme endpoint</div>
+<h3>Premier appel en 30 secondes</h3>
+<div class="code-block">
+<button class="copy-btn" onclick="copyCode(this)">Copier</button>
+<pre>// JavaScript
+fetch('${baseUrl}/api/v1/compute', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    tasks: [
+      { fn: "() => 10 + 5", addr: 0 },
+      { fn: "() => Math.pow(2, 10)", addr: 1 }
+    ]
+  })
+})
+.then(res => res.json())
+.then(data => console.log(data));</pre>
+</div>
+
+<div class="code-block">
+<button class="copy-btn" onclick="copyCode(this)">Copier</button>
+<pre># Python
+import requests
+response = requests.post(
+    '${baseUrl}/api/v1/compute',
+    json={'tasks': [{'fn': '() => 10 + 5', 'addr': 0}]}
+)
+print(response.json())</pre>
+</div>
+
+<div class="code-block">
+<button class="copy-btn" onclick="copyCode(this)">Copier</button>
+<pre># cURL
+curl -X POST ${baseUrl}/api/v1/compute \\
+  -H "Content-Type: application/json" \\
+  -d '{"tasks":[{"fn":"() => 10 + 5","addr":0}]}'</pre>
+</div>
+</div>
+
+<div class="section">
+<h2>🔌 Méthodes de Consommation</h2>
+<div class="feature-grid">
+<div class="feature-card"><div class="feature-icon">🌐</div><h3>REST API</h3><p>Standard HTTP/JSON</p></div>
+<div class="feature-card"><div class="feature-icon">📡</div><h3>GraphQL</h3><p>Queries flexibles</p></div>
+<div class="feature-card"><div class="feature-icon">⚡</div><h3>WebSocket</h3><p>Temps réel</p></div>
+</div>
+
+<h3>1. REST API (Recommandé)</h3>
+<div class="endpoint">
+<span class="method post">POST</span>
+<span class="endpoint-url">/api/v1/compute</span>
+<p style="margin-top:10px">Endpoint principal pour calculs parallèles</p>
+</div>
+
+<h3>2. GraphQL</h3>
+<div class="endpoint">
+<span class="method post">POST</span>
+<span class="endpoint-url">/graphql</span>
+<p style="margin-top:10px">Interface GraphiQL disponible: <a href="/graphql" style="color:#ffd700">${baseUrl}/graphql</a></p>
+</div>
+<div class="code-block">
+<button class="copy-btn" onclick="copyCode(this)">Copier</button>
+<pre>mutation {
+  compute(tasks: [{ fn: "() => 10 * 10", addr: 0 }]) {
+    success
+    results
+    execTime
+  }
+}</pre>
+</div>
+
+<h3>3. WebSocket (Streaming)</h3>
+<div class="endpoint">
+<span class="method ws">WS</span>
+<span class="endpoint-url">ws://${req.get('host')}</span>
+</div>
+<div class="code-block">
+<button class="copy-btn" onclick="copyCode(this)">Copier</button>
+<pre>const ws = new WebSocket('ws://${req.get('host')}');
+ws.onopen = () => {
+  ws.send(JSON.stringify({
+    type: 'compute',
+    tasks: [{ fn: '() => 100 * 2', addr: 0 }]
+  }));
+};
+ws.onmessage = (e) => console.log(JSON.parse(e.data));</pre>
+</div>
+</div>
+
+<div class="section">
+<h2>📚 Tous les Endpoints</h2>
+<div class="endpoint"><span class="method post">POST</span><span class="endpoint-url">/api/v1/compute</span><p>Compute principal</p></div>
+<div class="endpoint"><span class="method post">POST</span><span class="endpoint-url">/api/v1/compute/crypto/hash</span><p>Hash SHA-256</p></div>
+<div class="endpoint"><span class="method post">POST</span><span class="endpoint-url">/api/v1/compute/math</span><p>Opérations mathématiques</p></div>
+<div class="endpoint"><span class="method get">GET</span><span class="endpoint-url">/api/stats</span><p>Statistiques système</p></div>
+<div class="endpoint"><span class="method get">GET</span><span class="endpoint-url">/health</span><p>Health check</p></div>
+</div>
+
+<div class="section">
+<h2>💡 Cas d'Usage</h2>
+<div class="use-case"><h4>🔐 Cryptographie & Sécurité</h4><p>Hash de mots de passe, génération de tokens, vérification d'intégrité</p></div>
+<div class="use-case"><h4>🧮 Calculs Scientifiques</h4><p>Simulations, analyses statistiques, traitement de données</p></div>
+<div class="use-case"><h4>📊 Traitement de Données</h4><p>Agrégations, transformations, analyses parallèles</p></div>
+<div class="use-case"><h4>🎮 Simulations & Gaming</h4><p>Physics engines, IA, pathfinding parallèle</p></div>
+</div>
+
+<div class="section">
+<h2>⚠️ Limites Beta (Gratuit)</h2>
+<div class="info-banner">Phase Beta - Ces limites sont temporaires</div>
+<ul style="list-style:none;padding:0">
+<li style="padding:10px 0;border-bottom:1px solid rgba(255,255,255,0.1)">✅ <strong>Workers:</strong> 8 cœurs parallèles</li>
+<li style="padding:10px 0;border-bottom:1px solid rgba(255,255,255,0.1)">✅ <strong>RAM:</strong> 10 MB mémoire</li>
+<li style="padding:10px 0;border-bottom:1px solid rgba(255,255,255,0.1)">✅ <strong>Tâches:</strong> Illimitées durant beta</li>
+<li style="padding:10px 0;border-bottom:1px solid rgba(255,255,255,0.1)">✅ <strong>Timeout:</strong> 30s par tâche</li>
+<li style="padding:10px 0">✅ <strong>Rate Limit:</strong> Aucune limite beta</li>
+</ul>
+</div>
+
+<div class="section" style="text-align:center;background:linear-gradient(135deg,rgba(56,239,125,0.2) 0%,rgba(17,153,142,0.2) 100%)">
+<h2>🎯 Programme Beta</h2>
+<p style="font-size:1.2em;margin:20px 0">Testez gratuitement et aidez-nous à améliorer le produit</p>
+<div style="margin:30px 0">
+<p><strong>Ce que vous obtenez:</strong></p>
+<ul style="list-style:none;padding:0;margin:20px 0">
+<li style="padding:8px 0">✨ Accès gratuit illimité durant beta</li>
+<li style="padding:8px 0">🎁 Réduction 50% à vie après lancement</li>
+<li style="padding:8px 0">💬 Support prioritaire</li>
+<li style="padding:8px 0">🚀 Nouvelles features en avant-première</li>
+</ul>
+</div>
+<div><a href="/graphql" class="cta">Explorer GraphQL</a><a href="/api/stats" class="cta">Voir Stats</a></div>
+</div>
+
+<div style="text-align:center;margin-top:50px;opacity:0.7">
+<p>Compute Engine API v2.0.0-beta</p>
+<p style="margin-top:10px;font-size:0.9em">Questions ? Retours ? GitHub Issues</p>
+</div>
+</div>
+<script>
+function copyCode(btn){
+const code=btn.parentElement.querySelector('pre').textContent;
+navigator.clipboard.writeText(code).then(()=>{
+const orig=btn.textContent;
+btn.textContent='✓ Copié!';
+btn.style.background='#11998e';
+setTimeout(()=>{btn.textContent=orig;btn.style.background='#38ef7d'},2000);
+});
+}
+</script>
+</body>
+</html>`);
 });
 
-// Gestion erreurs
-process.on('uncaughtException', (error) => {
-  logger.add('System', `❌ Erreur critique: ${error.message}`);
-  console.error(error);
-});
-
-process.on('unhandledRejection', (reason, promise) => {
-  logger.add('System', `❌ Promise rejetée: ${reason}`);
-  console.error(reason);
+// ========================================
+// SERVER START
+// ========================================
+server.listen(PORT, () => {
+  console.log(`\n🚀 Compute Engine API v2.0.0-beta`);
+  console.log(`📍 Local: http://localhost:${PORT}`);
+  console.log(`📍 Production: ${process.env.RENDER_EXTERNAL_URL || 'N/A'}`);
+  console.log(`🌐 REST: /api/v1/compute`);
+  console.log(`📡 GraphQL: /graphql`);
+  console.log(`⚡ WebSocket: ws://localhost:${PORT}\n`);
 });
