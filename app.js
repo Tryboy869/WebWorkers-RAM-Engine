@@ -1,29 +1,191 @@
 // ========================================
-// COMPUTE ENGINE API v2.0.0-beta
-// REST + GraphQL + WebSocket + Documentation
+// COMPUTE ENGINE API v2.1.0 - SECURED
+// Production Ready with Security Layer
 // ========================================
 
 const express = require('express');
-const { graphqlHTTP } = require('express-graphql');
-const { buildSchema } = require('graphql');
-const WebSocket = require('ws');
+const crypto = require('crypto');
 const http = require('http');
 
 const app = express();
 const server = http.createServer(app);
 const PORT = process.env.PORT || 3000;
 
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
-app.use((req, res, next) => {
-  res.header('Access-Control-Allow-Origin', '*');
-  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE');
-  res.header('Access-Control-Allow-Headers', 'Content-Type');
-  next();
-});
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 // ========================================
-// CORE MODULES
+// SECURITY LAYER
+// ========================================
+
+class SecurityManager {
+  constructor() {
+    this.rateLimits = new Map();
+    this.suspiciousIPs = new Set();
+  }
+
+  checkRateLimit(ip) {
+    const now = Date.now();
+    const limit = this.rateLimits.get(ip);
+
+    if (!limit || now > limit.resetTime) {
+      this.rateLimits.set(ip, {
+        count: 1,
+        resetTime: now + 60000 // 1 minute
+      });
+      return { allowed: true, remaining: 99 };
+    }
+
+    if (limit.count >= 100) {
+      if (limit.count > 200) {
+        this.suspiciousIPs.add(ip);
+      }
+      return { 
+        allowed: false, 
+        retryAfter: Math.ceil((limit.resetTime - now) / 1000)
+      };
+    }
+
+    limit.count++;
+    return { allowed: true, remaining: 100 - limit.count };
+  }
+
+  isSuspicious(ip) {
+    return this.suspiciousIPs.has(ip);
+  }
+}
+
+const security = new SecurityManager();
+
+// Rate limiting middleware
+function rateLimiter(req, res, next) {
+  const ip = req.headers['x-forwarded-for']?.split(',')[0] || req.ip;
+  
+  if (security.isSuspicious(ip)) {
+    return res.status(429).json({ 
+      error: 'Too many requests',
+      message: 'Your IP has been temporarily blocked'
+    });
+  }
+
+  const check = security.checkRateLimit(ip);
+  
+  if (!check.allowed) {
+    res.setHeader('Retry-After', check.retryAfter);
+    return res.status(429).json({ 
+      error: 'Rate limit exceeded',
+      retryAfter: check.retryAfter
+    });
+  }
+
+  res.setHeader('X-RateLimit-Remaining', check.remaining);
+  next();
+}
+
+// ========================================
+// SAFE EXECUTOR (No eval)
+// ========================================
+
+class SafeExecutor {
+  constructor() {
+    this.operations = {
+      // Math operations
+      add: (a, b) => a + b,
+      subtract: (a, b) => a - b,
+      multiply: (a, b) => a * b,
+      divide: (a, b) => b !== 0 ? a / b : null,
+      modulo: (a, b) => a % b,
+      power: (base, exp) => exp <= 1000 ? Math.pow(base, exp) : null,
+      sqrt: (x) => Math.sqrt(x),
+      abs: (x) => Math.abs(x),
+      
+      // Trigonometry
+      sin: (x) => Math.sin(x),
+      cos: (x) => Math.cos(x),
+      tan: (x) => Math.tan(x),
+      
+      // Algorithms
+      fibonacci: (n) => {
+        if (n < 0 || n > 50) return null;
+        if (n <= 1) return n;
+        let a = 0, b = 1;
+        for (let i = 2; i <= n; i++) {
+          [a, b] = [b, a + b];
+        }
+        return b;
+      },
+      
+      factorial: (n) => {
+        if (n < 0 || n > 20) return null;
+        let result = 1;
+        for (let i = 2; i <= n; i++) result *= i;
+        return result;
+      },
+      
+      isPrime: (n) => {
+        if (n < 2 || n > 1000000) return null;
+        if (n === 2) return true;
+        if (n % 2 === 0) return false;
+        for (let i = 3; i <= Math.sqrt(n); i += 2) {
+          if (n % i === 0) return false;
+        }
+        return true;
+      },
+      
+      // Crypto
+      sha256: (data) => {
+        if (typeof data !== 'string' || data.length > 10000) return null;
+        return crypto.createHash('sha256').update(data).digest('hex');
+      },
+      
+      md5: (data) => {
+        if (typeof data !== 'string' || data.length > 10000) return null;
+        return crypto.createHash('md5').update(data).digest('hex');
+      }
+    };
+  }
+
+  validate(op, params) {
+    if (!this.operations[op]) {
+      return { valid: false, error: 'Unknown operation' };
+    }
+
+    // Validate parameters
+    const numericOps = ['add', 'subtract', 'multiply', 'divide', 'modulo', 'power'];
+    if (numericOps.includes(op)) {
+      const keys = op === 'power' ? ['base', 'exp'] : ['a', 'b'];
+      if (!keys.every(k => typeof params[k] === 'number')) {
+        return { valid: false, error: 'Invalid parameters' };
+      }
+    }
+
+    return { valid: true };
+  }
+
+  execute(op, params) {
+    const validation = this.validate(op, params);
+    if (!validation.valid) {
+      throw new Error(validation.error);
+    }
+
+    const fn = this.operations[op];
+    
+    if (['add', 'subtract', 'multiply', 'divide', 'modulo'].includes(op)) {
+      return fn(params.a, params.b);
+    } else if (op === 'power') {
+      return fn(params.base, params.exp);
+    } else if (['sqrt', 'abs', 'sin', 'cos', 'tan', 'fibonacci', 'factorial', 'isPrime'].includes(op)) {
+      return fn(params.n !== undefined ? params.n : params.x);
+    } else if (['sha256', 'md5'].includes(op)) {
+      return fn(params.data);
+    }
+  }
+}
+
+const executor = new SafeExecutor();
+
+// ========================================
+// CORE ENGINE (Original)
 // ========================================
 
 class SimulatedRAM {
@@ -36,14 +198,14 @@ class SimulatedRAM {
   }
 
   write(addr, value) {
-    if (addr < 0 || addr >= this.maxAddr) throw new Error(`Address ${addr} out of bounds`);
+    if (addr < 0 || addr >= this.maxAddr) throw new Error('Address out of bounds');
     this.memory.set(addr, value);
     this.writeCount++;
     return true;
   }
 
   read(addr) {
-    if (addr < 0 || addr >= this.maxAddr) throw new Error(`Address ${addr} out of bounds`);
+    if (addr < 0 || addr >= this.maxAddr) throw new Error('Address out of bounds');
     this.readCount++;
     return this.memory.get(addr) || 0;
   }
@@ -109,38 +271,9 @@ class Worker {
   }
 }
 
-class MessageBus {
-  constructor() {
-    this.listeners = new Map();
-    this.messageCount = 0;
-  }
-
-  subscribe(channel, callback) {
-    if (!this.listeners.has(channel)) this.listeners.set(channel, []);
-    this.listeners.get(channel).push(callback);
-  }
-
-  publish(channel, data) {
-    this.messageCount++;
-    const listeners = this.listeners.get(channel) || [];
-    listeners.forEach(callback => {
-      try { callback(data); } catch (error) {}
-    });
-  }
-
-  getStats() {
-    return {
-      totalMessages: this.messageCount,
-      channels: Array.from(this.listeners.keys()),
-      totalListeners: Array.from(this.listeners.values()).reduce((sum, arr) => sum + arr.length, 0)
-    };
-  }
-}
-
 class TaskScheduler {
-  constructor(ram, messageBus, numWorkers = 8) {
+  constructor(ram, numWorkers = 8) {
     this.ram = ram;
-    this.messageBus = messageBus;
     this.workers = Array.from({ length: numWorkers }, (_, i) => new Worker(i, ram));
     this.taskQueue = [];
     this.completedTasks = 0;
@@ -164,10 +297,8 @@ class TaskScheduler {
     
     if (result.success) {
       this.completedTasks++;
-      this.messageBus.publish('task.completed', result);
     } else {
       this.failedTasks++;
-      this.messageBus.publish('task.failed', result);
     }
     
     if (this.taskQueue.length > 0) {
@@ -176,13 +307,6 @@ class TaskScheduler {
     }
     
     return result;
-  }
-
-  addWorkers(count) {
-    const startId = this.workers.length;
-    for (let i = 0; i < count; i++) {
-      this.workers.push(new Worker(startId + i, this.ram));
-    }
   }
 
   getStats() {
@@ -201,8 +325,7 @@ class TaskScheduler {
 class ParallelEngine {
   constructor(config = {}) {
     this.ram = new SimulatedRAM(config.ramSize || 10 * 1024 * 1024);
-    this.messageBus = new MessageBus();
-    this.scheduler = new TaskScheduler(this.ram, this.messageBus, config.numWorkers || 8);
+    this.scheduler = new TaskScheduler(this.ram, config.numWorkers || 8);
     this.startTime = Date.now();
   }
 
@@ -219,8 +342,6 @@ class ParallelEngine {
     return { results, execTime, successCount, totalTasks: tasks.length };
   }
 
-  addWorkers(count) { this.scheduler.addWorkers(count); }
-  
   reset() {
     this.ram.clear();
     this.scheduler.completedTasks = 0;
@@ -232,8 +353,7 @@ class ParallelEngine {
     return {
       uptime: Date.now() - this.startTime,
       ram: this.ram.getStats(),
-      scheduler: this.scheduler.getStats(),
-      messageBus: this.messageBus.getStats()
+      scheduler: this.scheduler.getStats()
     };
   }
 }
@@ -241,354 +361,118 @@ class ParallelEngine {
 const engine = new ParallelEngine({ numWorkers: 8 });
 
 // ========================================
-// TEST SUITES
+// SECURED API ENDPOINTS
 // ========================================
-const TestSuite = {
-  simple: () => [
-    { fn: () => 10 + 5, addr: 0 },
-    { fn: () => 20 * 3, addr: 1 },
-    { fn: () => Math.pow(2, 10), addr: 2 },
-    { fn: () => 100 - 25, addr: 3 }
-  ],
-  heavy: () => {
-    const fib = (n) => n <= 1 ? n : fib(n - 1) + fib(n - 2);
-    return [
-      { fn: () => fib(20), addr: 10 },
-      { fn: () => Array(15).fill(0).reduce((a, _, i) => a * (i + 1) || 1, 1), addr: 11 },
-      { fn: () => Math.sqrt(987654321), addr: 12 },
-      { fn: () => Math.PI * Math.E * 1000, addr: 13 }
-    ];
-  },
-  massive: () => Array(100).fill(0).map((_, i) => ({
-    fn: () => Math.sin(i) * Math.cos(i) * 1000,
-    addr: 100 + i
-  }))
-};
 
-// ========================================
-// REST API
-// ========================================
-app.post('/api/v1/compute', async (req, res) => {
+app.post('/api/v1/compute', rateLimiter, async (req, res) => {
   try {
     const { tasks } = req.body;
-    const parsedTasks = tasks.map(t => ({ fn: eval(`(${t.fn})`), addr: t.addr }));
-    const result = await engine.run(parsedTasks);
-    res.json({ success: true, ...result });
-  } catch (error) {
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
-
-app.post('/api/v1/compute/crypto/hash', async (req, res) => {
-  try {
-    const { data } = req.body;
-    const crypto = require('crypto');
-    const task = { fn: () => crypto.createHash('sha256').update(data).digest('hex') };
-    const result = await engine.run([task]);
-    res.json({ success: true, hash: result.results[0].result });
-  } catch (error) {
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
-
-app.post('/api/v1/compute/math', async (req, res) => {
-  try {
-    const { operations } = req.body;
-    const tasks = operations.map((op, i) => ({ fn: eval(`(${op})`), addr: i }));
-    const result = await engine.run(tasks);
-    res.json({ success: true, results: result.results.map(r => r.result) });
-  } catch (error) {
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
-
-app.get('/api/stats', (req, res) => res.json(engine.getFullStats()));
-app.post('/api/reset', (req, res) => { engine.reset(); res.json({ success: true }); });
-app.post('/api/workers/add', (req, res) => {
-  const count = req.body.count || 4;
-  engine.addWorkers(count);
-  res.json({ success: true, totalWorkers: engine.scheduler.workers.length });
-});
-
-app.post('/api/test/simple', async (req, res) => res.json(await engine.run(TestSuite.simple())));
-app.post('/api/test/heavy', async (req, res) => res.json(await engine.run(TestSuite.heavy())));
-app.post('/api/test/massive', async (req, res) => res.json(await engine.run(TestSuite.massive())));
-
-app.get('/health', (req, res) => res.json({ 
-  status: 'healthy',
-  uptime: Date.now() - engine.startTime,
-  version: '2.0.0-beta'
-}));
-
-// ========================================
-// GRAPHQL
-// ========================================
-const schema = buildSchema(`
-  type Query {
-    stats: Stats
-    health: Health
-  }
-  type Mutation {
-    compute(tasks: [TaskInput!]!): ComputeResult!
-  }
-  type Stats {
-    uptime: Float
-    totalWorkers: Int
-    completedTasks: Int
-  }
-  type Health {
-    status: String
-    uptime: Float
-  }
-  type ComputeResult {
-    success: Boolean!
-    results: [Float]
-    execTime: Float
-  }
-  input TaskInput {
-    fn: String!
-    addr: Int
-  }
-`);
-
-const root = {
-  stats: () => {
-    const s = engine.getFullStats();
-    return { uptime: s.uptime, totalWorkers: s.scheduler.totalWorkers, completedTasks: s.scheduler.completedTasks };
-  },
-  health: () => ({ status: 'healthy', uptime: process.uptime() }),
-  compute: async ({ tasks }) => {
-    const parsed = tasks.map(t => ({ fn: eval(`(${t.fn})`), addr: t.addr }));
-    const result = await engine.run(parsed);
-    return { success: true, results: result.results.map(r => r.result), execTime: result.execTime };
-  }
-};
-
-app.use('/graphql', graphqlHTTP({ schema, rootValue: root, graphiql: true }));
-
-// ========================================
-// WEBSOCKET
-// ========================================
-const wss = new WebSocket.Server({ server });
-wss.on('connection', (ws) => {
-  ws.on('message', async (message) => {
-    try {
-      const data = JSON.parse(message);
-      if (data.type === 'compute') {
-        const tasks = data.tasks.map(t => ({ fn: eval(`(${t.fn})`), addr: t.addr }));
-        for (const task of tasks) {
-          const result = await engine.run([task]);
-          ws.send(JSON.stringify({ type: 'result', result: result.results[0] }));
-        }
-      }
-    } catch (error) {
-      ws.send(JSON.stringify({ type: 'error', message: error.message }));
+    
+    if (!Array.isArray(tasks) || tasks.length === 0 || tasks.length > 100) {
+      return res.status(400).json({ 
+        error: 'Invalid request',
+        message: 'Tasks must be an array (1-100 items)'
+      });
     }
+
+    const safeTasks = [];
+    
+    for (const task of tasks) {
+      if (!task.op || !task.params) {
+        return res.status(400).json({ 
+          error: 'Invalid task format',
+          message: 'Each task must have op and params'
+        });
+      }
+
+      try {
+        const result = executor.execute(task.op, task.params);
+        safeTasks.push({
+          fn: () => result,
+          addr: task.addr
+        });
+      } catch (error) {
+        return res.status(400).json({ 
+          error: 'Invalid operation',
+          message: error.message
+        });
+      }
+    }
+
+    const result = await engine.run(safeTasks);
+    res.json({ success: true, ...result });
+    
+  } catch (error) {
+    res.status(500).json({ 
+      error: 'Server error',
+      message: 'Internal processing error'
+    });
+  }
+});
+
+app.get('/api/stats', rateLimiter, (req, res) => {
+  res.json(engine.getFullStats());
+});
+
+app.post('/api/reset', rateLimiter, (req, res) => {
+  engine.reset();
+  res.json({ success: true });
+});
+
+app.get('/health', (req, res) => {
+  res.json({ 
+    status: 'healthy',
+    version: '2.1.0',
+    uptime: Date.now() - engine.startTime
   });
 });
 
 // ========================================
-// DOCUMENTATION UI
+// MINIMAL UI (No detailed docs)
 // ========================================
+
 app.get('/', (req, res) => {
-  const baseUrl = `${req.protocol}://${req.get('host')}`;
   res.send(`<!DOCTYPE html>
-<html lang="fr">
+<html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Compute Engine API - Documentation</title>
+<title>Compute API</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);color:#fff;line-height:1.6;padding:20px}
-.container{max-width:1200px;margin:0 auto}
-.header{text-align:center;margin-bottom:50px}
-h1{font-size:3em;margin-bottom:10px}
-.beta-badge{display:inline-block;background:#ff6b6b;padding:8px 20px;border-radius:25px;font-weight:bold;margin:10px 0;animation:pulse 2s infinite}
-@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.8}}
-.subtitle{font-size:1.2em;opacity:0.9;margin-top:15px}
-.section{background:rgba(255,255,255,0.1);backdrop-filter:blur(10px);border-radius:15px;padding:30px;margin-bottom:30px;border:2px solid rgba(255,255,255,0.2)}
-h2{font-size:2em;margin-bottom:20px;border-bottom:3px solid rgba(255,255,255,0.3);padding-bottom:10px}
-h3{font-size:1.5em;margin:25px 0 15px;color:#ffd700}
-.code-block{background:#1a1a1a;color:#0f0;padding:20px;border-radius:10px;overflow-x:auto;font-family:'Courier New',monospace;font-size:14px;margin:15px 0;border-left:4px solid #38ef7d;position:relative}
-.copy-btn{position:absolute;top:10px;right:10px;background:#38ef7d;color:#1a1a1a;border:none;padding:8px 15px;border-radius:5px;cursor:pointer;font-weight:bold;font-size:12px}
-.copy-btn:hover{background:#11998e}
-.method{display:inline-block;padding:5px 12px;border-radius:5px;font-weight:bold;font-size:12px;margin-right:10px}
-.post{background:#38ef7d;color:#1a1a1a}
-.get{background:#4facfe;color:#fff}
-.ws{background:#f093fb;color:#fff}
-.endpoint{background:rgba(0,0,0,0.3);padding:15px;border-radius:8px;margin:15px 0;border-left:4px solid #667eea}
-.endpoint-url{font-family:'Courier New',monospace;color:#ffd700;font-size:16px;margin:10px 0}
-.use-case{background:rgba(255,255,255,0.05);padding:15px;border-radius:8px;margin:10px 0;border-left:4px solid #ffd700}
-.feature-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:20px;margin:20px 0}
-.feature-card{background:rgba(255,255,255,0.08);padding:20px;border-radius:10px;text-align:center}
-.feature-icon{font-size:3em;margin-bottom:10px}
-.cta{display:inline-block;background:linear-gradient(135deg,#38ef7d 0%,#11998e 100%);color:#fff;padding:15px 40px;border-radius:50px;text-decoration:none;font-weight:bold;font-size:18px;margin:10px}
-.cta:hover{transform:translateY(-3px)}
-.info-banner{background:rgba(255,215,0,0.2);border-left:5px solid #ffd700;padding:15px 20px;margin:20px 0;border-radius:8px}
-pre{margin:0;white-space:pre-wrap;word-wrap:break-word}
+body{font-family:monospace;background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);color:#fff;display:flex;align-items:center;justify-content:center;min-height:100vh;padding:20px}
+.container{max-width:600px;text-align:center}
+h1{font-size:3em;margin-bottom:20px;text-shadow:2px 2px 4px rgba(0,0,0,0.3)}
+.status{display:inline-block;width:12px;height:12px;background:#0f0;border-radius:50%;margin-right:8px;animation:pulse 1.5s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.3}}
+.card{background:rgba(255,255,255,0.1);backdrop-filter:blur(10px);border-radius:15px;padding:30px;margin:20px 0;border:2px solid rgba(255,255,255,0.2)}
+.endpoint{background:rgba(0,0,0,0.3);padding:15px;border-radius:8px;margin:10px 0;text-align:left;font-size:14px}
+.method{display:inline-block;background:#38ef7d;color:#000;padding:4px 10px;border-radius:5px;font-weight:bold;margin-right:10px}
+code{background:rgba(0,0,0,0.5);padding:2px 8px;border-radius:4px;font-size:13px}
+a{color:#ffd700;text-decoration:none}
+a:hover{text-decoration:underline}
 </style>
 </head>
 <body>
 <div class="container">
-<div class="header">
-<h1>⚡ Compute Engine API</h1>
-<div class="beta-badge">BETA - FREE ACCESS</div>
-<p class="subtitle">API de calcul distribué haute performance</p>
-<p style="opacity:0.8;margin-top:10px">Infrastructure de calcul parallèle gratuite durant la phase beta</p>
+<h1>Compute API</h1>
+<div class="card">
+<p style="font-size:1.2em;margin-bottom:10px"><span class="status"></span>Service Online</p>
+<p style="opacity:0.8;font-size:0.9em">High-performance compute engine</p>
 </div>
-
-<div class="section">
-<h2>🚀 Démarrage Rapide</h2>
-<div class="info-banner"><strong>Aucune clé API requise</strong> - Utilisez directement l'URL comme endpoint</div>
-<h3>Premier appel en 30 secondes</h3>
-<div class="code-block">
-<button class="copy-btn" onclick="copyCode(this)">Copier</button>
-<pre>// JavaScript
-fetch('${baseUrl}/api/v1/compute', {
-  method: 'POST',
-  headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify({
-    tasks: [
-      { fn: "() => 10 + 5", addr: 0 },
-      { fn: "() => Math.pow(2, 10)", addr: 1 }
-    ]
-  })
-})
-.then(res => res.json())
-.then(data => console.log(data));</pre>
-</div>
-
-<div class="code-block">
-<button class="copy-btn" onclick="copyCode(this)">Copier</button>
-<pre># Python
-import requests
-response = requests.post(
-    '${baseUrl}/api/v1/compute',
-    json={'tasks': [{'fn': '() => 10 + 5', 'addr': 0}]}
-)
-print(response.json())</pre>
-</div>
-
-<div class="code-block">
-<button class="copy-btn" onclick="copyCode(this)">Copier</button>
-<pre># cURL
-curl -X POST ${baseUrl}/api/v1/compute \\
-  -H "Content-Type: application/json" \\
-  -d '{"tasks":[{"fn":"() => 10 + 5","addr":0}]}'</pre>
-</div>
-</div>
-
-<div class="section">
-<h2>🔌 Méthodes de Consommation</h2>
-<div class="feature-grid">
-<div class="feature-card"><div class="feature-icon">🌐</div><h3>REST API</h3><p>Standard HTTP/JSON</p></div>
-<div class="feature-card"><div class="feature-icon">📡</div><h3>GraphQL</h3><p>Queries flexibles</p></div>
-<div class="feature-card"><div class="feature-icon">⚡</div><h3>WebSocket</h3><p>Temps réel</p></div>
-</div>
-
-<h3>1. REST API (Recommandé)</h3>
+<div class="card">
+<h2 style="margin-bottom:15px">Quick Start</h2>
 <div class="endpoint">
-<span class="method post">POST</span>
-<span class="endpoint-url">/api/v1/compute</span>
-<p style="margin-top:10px">Endpoint principal pour calculs parallèles</p>
+<span class="method">POST</span>
+<code>/api/v1/compute</code>
 </div>
-
-<h3>2. GraphQL</h3>
-<div class="endpoint">
-<span class="method post">POST</span>
-<span class="endpoint-url">/graphql</span>
-<p style="margin-top:10px">Interface GraphiQL disponible: <a href="/graphql" style="color:#ffd700">${baseUrl}/graphql</a></p>
+<p style="margin-top:15px;opacity:0.8;font-size:0.9em">Contact for API documentation</p>
 </div>
-<div class="code-block">
-<button class="copy-btn" onclick="copyCode(this)">Copier</button>
-<pre>mutation {
-  compute(tasks: [{ fn: "() => 10 * 10", addr: 0 }]) {
-    success
-    results
-    execTime
-  }
-}</pre>
-</div>
-
-<h3>3. WebSocket (Streaming)</h3>
-<div class="endpoint">
-<span class="method ws">WS</span>
-<span class="endpoint-url">ws://${req.get('host')}</span>
-</div>
-<div class="code-block">
-<button class="copy-btn" onclick="copyCode(this)">Copier</button>
-<pre>const ws = new WebSocket('ws://${req.get('host')}');
-ws.onopen = () => {
-  ws.send(JSON.stringify({
-    type: 'compute',
-    tasks: [{ fn: '() => 100 * 2', addr: 0 }]
-  }));
-};
-ws.onmessage = (e) => console.log(JSON.parse(e.data));</pre>
+<div class="card">
+<p style="opacity:0.7;font-size:0.9em">Rate limit: 100 requests/minute</p>
+<p style="margin-top:10px"><a href="/health">Health Check</a> | <a href="/api/stats">Stats</a></p>
 </div>
 </div>
-
-<div class="section">
-<h2>📚 Tous les Endpoints</h2>
-<div class="endpoint"><span class="method post">POST</span><span class="endpoint-url">/api/v1/compute</span><p>Compute principal</p></div>
-<div class="endpoint"><span class="method post">POST</span><span class="endpoint-url">/api/v1/compute/crypto/hash</span><p>Hash SHA-256</p></div>
-<div class="endpoint"><span class="method post">POST</span><span class="endpoint-url">/api/v1/compute/math</span><p>Opérations mathématiques</p></div>
-<div class="endpoint"><span class="method get">GET</span><span class="endpoint-url">/api/stats</span><p>Statistiques système</p></div>
-<div class="endpoint"><span class="method get">GET</span><span class="endpoint-url">/health</span><p>Health check</p></div>
-</div>
-
-<div class="section">
-<h2>💡 Cas d'Usage</h2>
-<div class="use-case"><h4>🔐 Cryptographie & Sécurité</h4><p>Hash de mots de passe, génération de tokens, vérification d'intégrité</p></div>
-<div class="use-case"><h4>🧮 Calculs Scientifiques</h4><p>Simulations, analyses statistiques, traitement de données</p></div>
-<div class="use-case"><h4>📊 Traitement de Données</h4><p>Agrégations, transformations, analyses parallèles</p></div>
-<div class="use-case"><h4>🎮 Simulations & Gaming</h4><p>Physics engines, IA, pathfinding parallèle</p></div>
-</div>
-
-<div class="section">
-<h2>⚠️ Limites Beta (Gratuit)</h2>
-<div class="info-banner">Phase Beta - Ces limites sont temporaires</div>
-<ul style="list-style:none;padding:0">
-<li style="padding:10px 0;border-bottom:1px solid rgba(255,255,255,0.1)">✅ <strong>Workers:</strong> 8 cœurs parallèles</li>
-<li style="padding:10px 0;border-bottom:1px solid rgba(255,255,255,0.1)">✅ <strong>RAM:</strong> 10 MB mémoire</li>
-<li style="padding:10px 0;border-bottom:1px solid rgba(255,255,255,0.1)">✅ <strong>Tâches:</strong> Illimitées durant beta</li>
-<li style="padding:10px 0;border-bottom:1px solid rgba(255,255,255,0.1)">✅ <strong>Timeout:</strong> 30s par tâche</li>
-<li style="padding:10px 0">✅ <strong>Rate Limit:</strong> Aucune limite beta</li>
-</ul>
-</div>
-
-<div class="section" style="text-align:center;background:linear-gradient(135deg,rgba(56,239,125,0.2) 0%,rgba(17,153,142,0.2) 100%)">
-<h2>🎯 Programme Beta</h2>
-<p style="font-size:1.2em;margin:20px 0">Testez gratuitement et aidez-nous à améliorer le produit</p>
-<div style="margin:30px 0">
-<p><strong>Ce que vous obtenez:</strong></p>
-<ul style="list-style:none;padding:0;margin:20px 0">
-<li style="padding:8px 0">✨ Accès gratuit illimité durant beta</li>
-<li style="padding:8px 0">🎁 Réduction 50% à vie après lancement</li>
-<li style="padding:8px 0">💬 Support prioritaire</li>
-<li style="padding:8px 0">🚀 Nouvelles features en avant-première</li>
-</ul>
-</div>
-<div><a href="/graphql" class="cta">Explorer GraphQL</a><a href="/api/stats" class="cta">Voir Stats</a></div>
-</div>
-
-<div style="text-align:center;margin-top:50px;opacity:0.7">
-<p>Compute Engine API v2.0.0-beta</p>
-<p style="margin-top:10px;font-size:0.9em">Questions ? Retours ? GitHub Issues</p>
-</div>
-</div>
-<script>
-function copyCode(btn){
-const code=btn.parentElement.querySelector('pre').textContent;
-navigator.clipboard.writeText(code).then(()=>{
-const orig=btn.textContent;
-btn.textContent='✓ Copié!';
-btn.style.background='#11998e';
-setTimeout(()=>{btn.textContent=orig;btn.style.background='#38ef7d'},2000);
-});
-}
-</script>
 </body>
 </html>`);
 });
@@ -596,11 +480,20 @@ setTimeout(()=>{btn.textContent=orig;btn.style.background='#38ef7d'},2000);
 // ========================================
 // SERVER START
 // ========================================
+
 server.listen(PORT, () => {
-  console.log(`\n🚀 Compute Engine API v2.0.0-beta`);
-  console.log(`📍 Local: http://localhost:${PORT}`);
-  console.log(`📍 Production: ${process.env.RENDER_EXTERNAL_URL || 'N/A'}`);
-  console.log(`🌐 REST: /api/v1/compute`);
-  console.log(`📡 GraphQL: /graphql`);
-  console.log(`⚡ WebSocket: ws://localhost:${PORT}\n`);
+  console.log(`\n🔒 Compute Engine v2.1.0 - SECURED`);
+  console.log(`📍 Port: ${PORT}`);
+  console.log(`✅ Rate Limiting: 100 req/min per IP`);
+  console.log(`✅ No eval(): Whitelist-based execution`);
+  console.log(`✅ Input Validation: Active`);
+  console.log(`✅ Production Ready\n`);
+});
+
+process.on('uncaughtException', (error) => {
+  console.error('Critical error:', error.message);
+});
+
+process.on('unhandledRejection', (reason) => {
+  console.error('Unhandled rejection:', reason);
 });
